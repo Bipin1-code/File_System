@@ -3,6 +3,43 @@
 #include <stdio.h>
 #include <windows.h>
 #include <stdint.h>
+#include <winternl.h>
+#include <ntstatus.h>
+#include <winioctl.h>
+
+
+/* MinGW defines the size macro but not the structure */
+#ifndef _MY_REPARSE_DATA_BUFFER_DEFINED
+#define _MY_REPARSE_DATA_BUFFER_DEFINED
+typedef struct _REPARSE_DATA_BUFFER {
+    ULONG  ReparseTag;
+    USHORT ReparseDataLength;
+    USHORT Reserved;
+    union {
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            ULONG  Flags;
+            WCHAR  PathBuffer[1];
+        } SymbolicLinkReparseBuffer;
+
+        struct {
+            USHORT SubstituteNameOffset;
+            USHORT SubstituteNameLength;
+            USHORT PrintNameOffset;
+            USHORT PrintNameLength;
+            WCHAR  PathBuffer[1];
+        } MountPointReparseBuffer;
+
+        struct {
+            UCHAR DataBuffer[1];
+        } GenericReparseBuffer;
+    };
+} REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
+#endif
+
 
 
 void printfFileAttributes(DWORD attrs){
@@ -70,42 +107,96 @@ int printHardLinks(const wchar_t *filePath){
     return countHardLink;
 }
 
+//Return 0 on failure
+ULONG FindSpecialExtraInfo(HANDLE hFile){
+    BYTE buffer[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+    DWORD bytesReturned;
+
+    if(!DeviceIoControl(hFile,
+                        FSCTL_GET_REPARSE_POINT,
+                        NULL, 0, buffer,
+                        sizeof(buffer),
+                        &bytesReturned, NULL))
+        {
+            return 0;
+        }
+
+    REPARSE_DATA_BUFFER *rdb = (REPARSE_DATA_BUFFER*)buffer;
+    return rdb->ReparseTag;
+}
+
+void printfReparseTagString(ULONG reparseTag){
+    switch(reparseTag){
+        case IO_REPARSE_TAG_SYMLINK:{
+            puts("SYMLINK");
+            break; 
+        }
+        case IO_REPARSE_TAG_MOUNT_POINT:{
+            puts("MOUNT_POINT");
+            break; 
+        }
+        case IO_REPARSE_TAG_APPEXECLINK:{
+            puts("APPEXECLINK");
+            break; 
+        }
+        case IO_REPARSE_TAG_CLOUD:{
+            puts("CLOUD");
+            break; 
+        }
+        case IO_REPARSE_TAG_DFS:{
+            puts("DFS");
+            break; 
+        }
+        case IO_REPARSE_TAG_WIM:{
+            puts("WIM");
+            break; 
+        }
+        case IO_REPARSE_TAG_SIS:{
+            puts("SIS");
+            break; 
+        }
+        default:
+            printf("UNKNOWN(Ox%08lx)", reparseTag);
+            break;
+    } 
+}
+
 int main(){
     /*
-    WIN32_FIND_DATAW findData;
-    HANDLE hFind;
+      WIN32_FIND_DATAW findData;
+      HANDLE hFind;
     
-    wchar_t dirPath[MAX_PATH];
-    GetCurrentDirectoryW(MAX_PATH, dirPath);
+      wchar_t dirPath[MAX_PATH];
+      GetCurrentDirectoryW(MAX_PATH, dirPath);
 
-    wchar_t searchPath[MAX_PATH];
-    swprintf(searchPath, MAX_PATH, L"%ls\\*", dirPath);
+      wchar_t searchPath[MAX_PATH];
+      swprintf(searchPath, MAX_PATH, L"%ls\\*", dirPath);
 
-    hFind = FindFirstFileW(searchPath, &findData);
-    if(hFind == INVALID_HANDLE_VALUE){
-        wprintf(L"Failed to list directory: %ls\n", dirPath);
-        return 1;
-    }
+      hFind = FindFirstFileW(searchPath, &findData);
+      if(hFind == INVALID_HANDLE_VALUE){
+      wprintf(L"Failed to list directory: %ls\n", dirPath);
+      return 1;
+      }
 
-    do{
-        if(wcscmp(findData.cFileName, L".") == 0 ||
-           wcscmp(findData.cFileName, L"..") == 0)
-            continue;
-        wprintf(L"Name: %ls\t", findData.cFileName);
+      do{
+      if(wcscmp(findData.cFileName, L".") == 0 ||
+      wcscmp(findData.cFileName, L"..") == 0)
+      continue;
+      wprintf(L"Name: %ls\t", findData.cFileName);
 
-        printf("Attr: ");
-        printfFileAttributes(findData.dwFileAttributes);
+      printf("Attr: ");
+      printfFileAttributes(findData.dwFileAttributes);
 
-        if(!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)){
-            LARGE_INTEGER size;
-            size.HighPart = findData.nFileSizeHigh;
-            size.LowPart = findData.nFileSizeLow;
-            printf("\tSize: %lld bytes", size.QuadPart);
-        }
-        printf("\n");
-    }while(FindNextFileW(hFind, &findData));
+      if(!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)){
+      LARGE_INTEGER size;
+      size.HighPart = findData.nFileSizeHigh;
+      size.LowPart = findData.nFileSizeLow;
+      printf("\tSize: %lld bytes", size.QuadPart);
+      }
+      printf("\n");
+      }while(FindNextFileW(hFind, &findData));
 
-    FindClose(hFind);
+      FindClose(hFind);
     */
 
     // const wchar_t *filePath = L"D:\\SoftwareFoundationInfo\\WindowsProjects\\winAppLauncher.c";
@@ -120,15 +211,18 @@ int main(){
     /* printfFileAttributes(attrV); */
 
     //const wchar_t *filePath = L"C:\\Users\\bipin\\NTUSER.DAT";
- 
+
+    //TODO: Please make sure To check object before implementing below code because
+    // some of the function must File_object if not access denied
+    
     const wchar_t *filePath =
-        L"D:\\SoftwareFoundationInfo\\WindowsProjects\\winAppLauncher.c";
+        L"D:\\SoftwareFoundationInfo\\WindowsProjects\\testlink.c";
     HANDLE hFile = CreateFileW(filePath,
-                               GENERIC_READ,
-                               FILE_SHARE_READ,
+                               GENERIC_READ | FILE_READ_ATTRIBUTES,
+                               FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                NULL,
                                OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL,
+                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                                NULL);
     
     if(hFile == INVALID_HANDLE_VALUE){
@@ -136,93 +230,149 @@ int main(){
         return 1;
     }
     
-    /* //Win32 API approach */
-    /* LARGE_INTEGER readEOFSize; */
-    /* BOOL ok = GetFileSizeEx(hFile, &readEOFSize); */
-    /* if(ok){ */
-    /*     printf("ReadEOFSize = %lld | ", readEOFSize.QuadPart); */
-    /* }else{ */
-    /*     puts("Error You don't have correct readEOFSize."); */
-    /* } */
+    //Win32 API approach
+    LARGE_INTEGER readEOFSize;
+    BOOL ok = GetFileSizeEx(hFile, &readEOFSize);
+    if(ok){
+        printf("ReadEOFSize = %lld | ", readEOFSize.QuadPart);
+    }else{
+        puts("Error You don't have correct readEOFSize.");
+    }
 
-    /* DWORD high = 0; */
-    /* DWORD low = GetCompressedFileSizeW(filePath, &high); */
-    /* if(low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR){ */
-    /*     printf("GetCompressedFileSizeW failed : %lu\n", GetLastError()); */
-    /* }else{ */
-    /*     ULONGLONG allocateSize = ((ULONGLONG)high << 32) | low; */
-    /*     printf("ASize = %llu\n", allocateSize); */
-    /* } */
+    DWORD high = 0;
+    DWORD low = GetCompressedFileSizeW(filePath, &high);
+    if(low == INVALID_FILE_SIZE && GetLastError() != NO_ERROR){
+        printf("GetCompressedFileSizeW failed : %lu\n", GetLastError());
+    }else{
+        ULONGLONG allocateSize = ((ULONGLONG)high << 32) | low;
+        printf("ASize = %llu\n", allocateSize);
+    }
 
-    /* BY_HANDLE_FILE_INFORMATION fileInformation; */
-    /* BOOL okay = GetFileInformationByHandle(hFile, &fileInformation); */
-    /* if(okay){ */
-    /*     DWORD attribute = fileInformation.dwFileAttributes; */
-    /*     printfFileAttributes(attribute); */
-    /*     FILETIME createTime = fileInformation.ftCreationTime; */
-    /*     FILETIME lastAccessTime = fileInformation.ftLastAccessTime; */
-    /*     FILETIME lastWriteTime = fileInformation.ftLastWriteTime; */
+    BY_HANDLE_FILE_INFORMATION fileInformation;
+    BOOL okay = GetFileInformationByHandle(hFile, &fileInformation);
+    if(okay){
+        DWORD attribute = fileInformation.dwFileAttributes;
+        printfFileAttributes(attribute);
+        FILETIME createTime = fileInformation.ftCreationTime;
+        FILETIME lastAccessTime = fileInformation.ftLastAccessTime;
+        FILETIME lastWriteTime = fileInformation.ftLastWriteTime;
 
-    /*     char timeRepresent[100]; */
-    /*     snprintf(timeRepresent, sizeof(timeRepresent), */
-    /*              "%s", "createTime"); */
-    /*     covertToSystemTime(createTime, timeRepresent); */
+        char timeRepresent[100];
+        snprintf(timeRepresent, sizeof(timeRepresent),
+                 "%s", "createTime");
+        covertToSystemTime(createTime, timeRepresent);
         
-    /*     snprintf(timeRepresent, sizeof(timeRepresent), */
-    /*              "%s", "lastAccessTime"); */
-    /*     covertToSystemTime(lastAccessTime, timeRepresent); */
+        snprintf(timeRepresent, sizeof(timeRepresent),
+                 "%s", "lastAccessTime");
+        covertToSystemTime(lastAccessTime, timeRepresent);
         
-    /*     snprintf(timeRepresent, sizeof(timeRepresent), */
-    /*                      "%s", "lastWriteTime"); */
-    /*     covertToSystemTime(lastWriteTime, timeRepresent); */
+        snprintf(timeRepresent, sizeof(timeRepresent),
+                         "%s", "lastWriteTime");
+        covertToSystemTime(lastWriteTime, timeRepresent);
 
-    /*     uint64_t fileIndex = ((uint64_t)fileInformation.nFileIndexHigh << 32) | */
-    /*         fileInformation.nFileIndexLow; */
+        uint64_t fileIndex = ((uint64_t)fileInformation.nFileIndexHigh << 32) |
+            fileInformation.nFileIndexLow;
         
-    /*     int hardLink = printHardLinks(filePath); */
-    /*     if(hardLink == -1){ */
-    /*         puts("Error occurred to find hard link"); */
-    /*     } */
+        int hardLink = printHardLinks(filePath);
+        if(hardLink == -1){
+            puts("Error occurred to find hard link");
+        }
 
-    /*     if(hardLink != (int)fileInformation.nNumberOfLinks){ */
-    /*         printf( */
-    /*                "WARNING: Hard link enumeration incomplete. " */
-    /*                "Kernel reports %lu links, enumeration found %d. " */
-    /*                "Possible causes: access restrictions, concurrent modification, or filesystem filters.\n", */
-    /*                fileInformation.nNumberOfLinks, */
-    /*                hardLink */
-    /*                ); */
-    /*     } */
-    /*     printf(" | VolSerialNumber: %lu | FileId: %llu | nLinks: %lu | HardLink:  %d ", */
-    /*            fileInformation.dwVolumeSerialNumber, */
-    /*            fileIndex, */
-    /*            fileInformation.nNumberOfLinks, */
-    /*            hardLink); */
+        if(hardLink != (int)fileInformation.nNumberOfLinks){
+            printf(
+                   "WARNING: Hard link enumeration incomplete. "
+                   "Kernel reports %lu links, enumeration found %d. "
+                   "Possible causes: access restrictions, concurrent modification, or filesystem filters.\n",
+                   fileInformation.nNumberOfLinks,
+                   hardLink
+                   );
+        }
+        printf(" | VolSerialNumber: %lu | FileId: %llu | nLinks: %lu | HardLink:  %d ",
+               fileInformation.dwVolumeSerialNumber,
+               fileIndex,
+               fileInformation.nNumberOfLinks,
+               hardLink);
         
-    /* }else{ */
-    /*     printf("Error status code = %lu\n", GetLastError()); */
-    /* } */
-    //printf("\n");
+    }else{
+        printf("Error status code = %lu\n", GetLastError());
+    }
+    printf("\n\n +++++++++++ NT APIs ++++++++++++++++\n");
 
     //NT Lvl appraoch
     IO_STATUS_BLOCK ioSB;
-    FILE_BASIC_INFORMATION fBInfo;
+    ULONG size = sizeof(FILE_ALL_INFORMATION) + 1024;
+    PFILE_ALL_INFORMATION fAI = malloc(size);
     
-    NTSTATUS ntStatus = NtQueryInformationFile(hFile, &ioSB, &fBInfo,
-                                               sizeof(fBInfo),
-                                               FileBasiceInformation
+    NTSTATUS ntStatus = NtQueryInformationFile(hFile, &ioSB, fAI,
+                                               size,
+                                               FileAllInformation
                                                );
+ 
     if(NT_SUCCESS(ntStatus)){
-        //We do real work here
-        //To do use FileAllInformation and parse needed data correctly
-    }else if(ntStatus == STATUS_INFO_LENGTH_MISMATCH){
-        puts("ERROR: Status information length mismatch");
-    }else if(ntStatus == STATUS_INVALID_PARAMETER){
-        puts("ERROR: Status invalid parameter");
-    }else{
-        puts("ERROR: STATUS_ACCESS_DENIED or else error");
+        
+        FILE_BASIC_INFORMATION fbInfo = fAI->BasicInformation;
+        FILE_STANDARD_INFORMATION fsInfo = fAI->StandardInformation;
+        
+        if(fsInfo.Directory){
+            printf("[Type: DIR] | ");
+        }else{
+            printf("[Type: File] | ");
+        }
+            
+        //File Attribute
+        DWORD attri = (DWORD)fbInfo.FileAttributes;
+
+        //This is not internal part of FILE_ALL_INFORMATION struct
+        if(fbInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT){
+            ULONG reparseTag = FindSpecialExtraInfo(hFile);
+            printfReparseTagString(reparseTag);
+        }
+
+        printfFileAttributes(attri);
+        
+        FILETIME ft;
+        char timeRepresent[100];
+
+        // Creation time
+        ft.dwLowDateTime  = fbInfo.CreationTime.LowPart;
+        ft.dwHighDateTime = fbInfo.CreationTime.HighPart;
+        snprintf(timeRepresent, sizeof(timeRepresent), "%s", "createTime");
+        covertToSystemTime(ft, timeRepresent);
+
+        // Last access time
+        ft.dwLowDateTime  = fbInfo.LastAccessTime.LowPart;
+        ft.dwHighDateTime = fbInfo.LastAccessTime.HighPart;
+        snprintf(timeRepresent, sizeof(timeRepresent), "%s", "lastAccessTime");
+        covertToSystemTime(ft, timeRepresent);
+
+        // Last write time
+        ft.dwLowDateTime  = fbInfo.LastWriteTime.LowPart;
+        ft.dwHighDateTime = fbInfo.LastWriteTime.HighPart;
+        snprintf(timeRepresent, sizeof(timeRepresent), "%s", "lastWriteTime");
+        covertToSystemTime(ft, timeRepresent);
+
+         // Change time
+        ft.dwLowDateTime  = fbInfo.ChangeTime.LowPart;
+        ft.dwHighDateTime = fbInfo.ChangeTime.HighPart;
+        snprintf(timeRepresent, sizeof(timeRepresent), "%s", "ChangeTime");
+        covertToSystemTime(ft, timeRepresent);
+
+        FILE_INTERNAL_INFORMATION fIInfo = fAI->InternalInformation;
+        LARGE_INTEGER FileId = fIInfo.IndexNumber;
+        printf(" | FileId: %lld", FileId.QuadPart);
+
     }
-    
+    else if(ntStatus == STATUS_INFO_LENGTH_MISMATCH){
+        puts("ERROR: STATUS_INFO_LENGTH_MISMATCH");
+    }
+    else if(ntStatus == (long int)STATUS_INVALID_PARAMETER){
+        puts("ERROR: STATUS_INVALID_PARAMETER");
+    }
+    else{
+        printf("ERROR: NtQueryInformationFile failed: 0x%08lx\n", ntStatus);
+    }
+
+    free(fAI);
     CloseHandle(hFile);
     
     return 0;
