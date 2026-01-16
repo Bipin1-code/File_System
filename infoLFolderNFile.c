@@ -7,7 +7,6 @@
 #include <ntstatus.h>
 #include <winioctl.h>
 
-
 /* MinGW defines the size macro but not the structure */
 #ifndef _MY_REPARSE_DATA_BUFFER_DEFINED
 #define _MY_REPARSE_DATA_BUFFER_DEFINED
@@ -40,9 +39,8 @@ typedef struct _REPARSE_DATA_BUFFER {
 } REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
 #endif
 
-
-
 void printfFileAttributes(DWORD attrs){
+    printf(" [");
     if(attrs == FILE_ATTRIBUTE_NORMAL) printf("N");
     else{
         printf("%c", (attrs & FILE_ATTRIBUTE_DIRECTORY) ? 'D' : '-');
@@ -54,6 +52,7 @@ void printfFileAttributes(DWORD attrs){
         printf("%c", (attrs & FILE_ATTRIBUTE_ENCRYPTED) ? 'E' : '-');
         printf("%c", (attrs & FILE_ATTRIBUTE_REPARSE_POINT) ? 'L' : '-');
     }
+    printf("] ");
 }
 
 void covertToSystemTime(FILETIME fileTime, const char *s){
@@ -107,8 +106,12 @@ int printHardLinks(const wchar_t *filePath){
     return countHardLink;
 }
 
-//Return 0 on failure
-ULONG FindSpecialExtraInfo(HANDLE hFile){
+/*Return 0 on failure
+  Detailed, Costly, FileSystem-specific
+  Where does this actually go?
+  How do I reconstructure the target?
+*/
+ULONG FindSpecialExtraInfo(HANDLE hFile, const wchar_t *filePath){
     BYTE buffer[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
     DWORD bytesReturned;
 
@@ -121,10 +124,72 @@ ULONG FindSpecialExtraInfo(HANDLE hFile){
             return 0;
         }
 
-    REPARSE_DATA_BUFFER *rdb = (REPARSE_DATA_BUFFER*)buffer;
+    REPARSE_DATA_BUFFER *rdb = (REPARSE_DATA_BUFFER *)buffer;
+
+    if(rdb->ReparseTag == IO_REPARSE_TAG_SYMLINK){
+
+        BOOLEAN isRelative =
+            (rdb->SymbolicLinkReparseBuffer.Flags & SYMLINK_FLAG_RELATIVE) != 0;
+
+        if (isRelative) {
+            printf(" (relative)\n");
+
+            printf("Flags = 0x%lx\n",
+                   rdb->SymbolicLinkReparseBuffer.Flags);
+
+            WCHAR *printName = (WCHAR *)(
+                                         (BYTE *)rdb
+                                         + FIELD_OFFSET(REPARSE_DATA_BUFFER,
+                                                        SymbolicLinkReparseBuffer.PathBuffer)
+                                         + rdb->SymbolicLinkReparseBuffer.PrintNameOffset
+                                         );
+
+            WCHAR *substName = (WCHAR *)(
+                                         (BYTE *)rdb
+                                         + FIELD_OFFSET(REPARSE_DATA_BUFFER,
+                                                        SymbolicLinkReparseBuffer.PathBuffer)
+                                         + rdb->SymbolicLinkReparseBuffer.SubstituteNameOffset
+                                         );
+
+            wprintf(L" PrintName: %.*s | ", rdb->SymbolicLinkReparseBuffer.PrintNameLength / 2,
+                    printName);
+
+            wprintf(L" SubstituteName: %.*s | \n", rdb->SymbolicLinkReparseBuffer.SubstituteNameLength / 2,
+                    substName);
+
+            if (!filePath || !*filePath)
+                return rdb->ReparseTag;
+
+            const wchar_t *sourceName = wcsrchr(filePath, L'\\');
+            sourceName = sourceName ? sourceName + 1 : filePath;
+
+            wchar_t linkDir[MAX_PATH];
+            wcsncpy(linkDir, filePath, MAX_PATH - 1);
+            linkDir[MAX_PATH - 1] = L'\0';
+
+            wchar_t *lastSlash = wcsrchr(linkDir, L'\\');
+            if(lastSlash)
+                *lastSlash = L'\0';
+
+            wchar_t resolved[MAX_PATH];
+            swprintf(resolved, MAX_PATH, L"%ls\\%.*ls", linkDir,
+                     rdb->SymbolicLinkReparseBuffer.PrintNameLength / sizeof(WCHAR),
+                     printName);
+
+            wchar_t finalPath[MAX_PATH];
+            GetFullPathNameW(resolved, MAX_PATH, finalPath, NULL);
+
+            wchar_t *targetName = wcsrchr(finalPath, L'\\');
+            targetName = targetName ? targetName + 1 : finalPath;
+
+            wprintf(L"%ls -> %ls\n", sourceName, targetName);
+
+        }
+    }
     return rdb->ReparseTag;
 }
 
+//What kind of Reparse Behavior does it have?
 void printfReparseTagString(ULONG reparseTag){
     switch(reparseTag){
         case IO_REPARSE_TAG_SYMLINK:{
@@ -161,73 +226,19 @@ void printfReparseTagString(ULONG reparseTag){
     } 
 }
 
-int main(){
-    /*
-      WIN32_FIND_DATAW findData;
-      HANDLE hFind;
-    
-      wchar_t dirPath[MAX_PATH];
-      GetCurrentDirectoryW(MAX_PATH, dirPath);
+void getFileNtLvlInfo(const wchar_t *filePath){
 
-      wchar_t searchPath[MAX_PATH];
-      swprintf(searchPath, MAX_PATH, L"%ls\\*", dirPath);
-
-      hFind = FindFirstFileW(searchPath, &findData);
-      if(hFind == INVALID_HANDLE_VALUE){
-      wprintf(L"Failed to list directory: %ls\n", dirPath);
-      return 1;
-      }
-
-      do{
-      if(wcscmp(findData.cFileName, L".") == 0 ||
-      wcscmp(findData.cFileName, L"..") == 0)
-      continue;
-      wprintf(L"Name: %ls\t", findData.cFileName);
-
-      printf("Attr: ");
-      printfFileAttributes(findData.dwFileAttributes);
-
-      if(!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)){
-      LARGE_INTEGER size;
-      size.HighPart = findData.nFileSizeHigh;
-      size.LowPart = findData.nFileSizeLow;
-      printf("\tSize: %lld bytes", size.QuadPart);
-      }
-      printf("\n");
-      }while(FindNextFileW(hFind, &findData));
-
-      FindClose(hFind);
-    */
-
-    // const wchar_t *filePath = L"D:\\SoftwareFoundationInfo\\WindowsProjects\\winAppLauncher.c";
-
-    /* //Only present what the kernel enforces, */
-    /* //the object actually is, behavior is guaranteed */
-    /* DWORD attrV = GetFileAttributesW(filePath); */
-    /* if(attrV == INVALID_FILE_ATTRIBUTES){ */
-    /*     puts("File does not exist or path is incorrect."); */
-    /*     return 1; */
-    /* } */
-    /* printfFileAttributes(attrV); */
-
-    //const wchar_t *filePath = L"C:\\Users\\bipin\\NTUSER.DAT";
-
-    //TODO: Please make sure To check object before implementing below code because
-    // some of the function must File_object if not access denied
-    
-    const wchar_t *filePath =
-        L"D:\\SoftwareFoundationInfo\\WindowsProjects\\testlink.c";
     HANDLE hFile = CreateFileW(filePath,
-                               GENERIC_READ | FILE_READ_ATTRIBUTES,
+                               0,
                                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                NULL,
                                OPEN_EXISTING,
-                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                               FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                                NULL);
     
     if(hFile == INVALID_HANDLE_VALUE){
         printf("CreateFileW Failed: %lu\n", GetLastError());
-        return 1;
+        return;
     }
     
     //Win32 API approach
@@ -267,7 +278,7 @@ int main(){
         covertToSystemTime(lastAccessTime, timeRepresent);
         
         snprintf(timeRepresent, sizeof(timeRepresent),
-                         "%s", "lastWriteTime");
+                 "%s", "lastWriteTime");
         covertToSystemTime(lastWriteTime, timeRepresent);
 
         uint64_t fileIndex = ((uint64_t)fileInformation.nFileIndexHigh << 32) |
@@ -321,14 +332,24 @@ int main(){
             
         //File Attribute
         DWORD attri = (DWORD)fbInfo.FileAttributes;
-
+  
         //This is not internal part of FILE_ALL_INFORMATION struct
         if(fbInfo.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT){
-            ULONG reparseTag = FindSpecialExtraInfo(hFile);
+            ULONG reparseTag = FindSpecialExtraInfo(hFile, filePath);
             printfReparseTagString(reparseTag);
         }
 
         printfFileAttributes(attri);
+
+        LARGE_INTEGER Allocation_Size = fsInfo.AllocationSize;
+        printf( " AllocationSize: %lld | ", Allocation_Size.QuadPart);
+
+        LARGE_INTEGER EOF_Size = fsInfo.EndOfFile;
+        printf( " EOF_Size: %lld | ", EOF_Size.QuadPart);
+
+        ULONG hardLinks = fsInfo.NumberOfLinks;
+        printf("HardLink: %lu | ", hardLinks);
+        
         
         FILETIME ft;
         char timeRepresent[100];
@@ -351,7 +372,7 @@ int main(){
         snprintf(timeRepresent, sizeof(timeRepresent), "%s", "lastWriteTime");
         covertToSystemTime(ft, timeRepresent);
 
-         // Change time
+        // Change time
         ft.dwLowDateTime  = fbInfo.ChangeTime.LowPart;
         ft.dwHighDateTime = fbInfo.ChangeTime.HighPart;
         snprintf(timeRepresent, sizeof(timeRepresent), "%s", "ChangeTime");
@@ -372,8 +393,100 @@ int main(){
         printf("ERROR: NtQueryInformationFile failed: 0x%08lx\n", ntStatus);
     }
 
+    printf("\n");
+
     free(fAI);
     CloseHandle(hFile);
+}
+
+int main(){
+    /*
+      WIN32_FIND_DATAW findData;
+      HANDLE hFind;
     
+      wchar_t dirPath[MAX_PATH];
+      GetCurrentDirectoryW(MAX_PATH, dirPath);
+
+      wchar_t searchPath[MAX_PATH];
+      swprintf(searchPath, MAX_PATH, L"%ls\\*", dirPath);
+
+      hFind = FindFirstFileW(searchPath, &findData);
+      if(hFind == INVALID_HANDLE_VALUE){
+      wprintf(L"Failed to list directory: %ls\n", dirPath);
+      return 1;
+      }
+
+      do{
+      if(wcscmp(findData.cFileName, L".") == 0 ||
+      wcscmp(findData.cFileName, L"..") == 0)
+      continue;
+      wprintf(L"Name: %ls\t", findData.cFileName);
+
+      printf("Attr: ");
+      printfFileAttributes(findData.dwFileAttributes);
+
+      if(!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)){
+      LARGE_INTEGER size;
+      size.HighPart = findData.nFileSizeHigh;
+      size.LowPart = findData.nFileSizeLow;
+      printf("\tSize: %lld bytes", size.QuadPart);
+      }
+      printf("\n");
+      }while(FindNextFileW(hFind, &findData));
+
+      FindClose(hFind);
+    */
+
+    /* const wchar_t *filePath = L"D:\\SoftwareFoundationInfo\\WindowsProjects\\winAppLauncher.c"; */
+
+    /* //Only present what the kernel enforces, */
+    /* //the object actually is, behavior is guaranteed */
+    /* DWORD attrV = GetFileAttributesW(filePath); */
+    /* if(attrV == INVALID_FILE_ATTRIBUTES){ */
+    /*     puts("File does not exist or path is incorrect."); */
+    /*     return 1; */
+    /* } */
+    /* printfFileAttributes(attrV); */
+
+    /* const wchar_t *filePath = L"C:\\Users\\bipin\\NTUSER.DAT"; */
+
+    //TODO: Please make sure To check object before implementing below code because
+    // some of the function must File_object if not access denied
+
+    WIN32_FIND_DATAW data;
+
+    const wchar_t *path =
+        L"D:\\SoftwareFoundationInfo\\WindowsProjects\\*";
+
+    HANDLE h = FindFirstFileW(path, &data);
+    if(h == INVALID_HANDLE_VALUE){
+        printf("FindFirstFileW failed: %lu\n",
+               GetLastError());
+        return 1;
+    }
+
+    do{
+        if(wcscmp(data.cFileName, L".") != 0
+           && wcscmp(data.cFileName, L"..") != 0){
+            printf("\n------------------\n");
+            wprintf(L"%ls\n", data.cFileName);
+
+            wchar_t filePath[MAX_PATH];
+            swprintf(NULL, 0, L"%ls\\%ls",
+                               L"D:\\SoftwareFoundationInfo\\WindowsProjects",
+                               data.cFileName);
+           
+            swprintf(filePath, MAX_PATH, L"%ls\\%ls",
+                     L"D:\\SoftwareFoundationInfo\\WindowsProjects",
+                     data.cFileName);
+            
+            getFileNtLvlInfo(filePath);
+            
+            printf("------------------\n");
+        }      
+    }while(FindNextFileW(h, &data));
+
+    
+    FindClose(h);
     return 0;
 }
